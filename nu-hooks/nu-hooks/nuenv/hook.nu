@@ -8,86 +8,103 @@ def get-allowed []: [ nothing -> list<string> ] {
     }
 }
 
-# setup a hook that will try to load `.env.nu` if it is allowed
+# Load an allowed `.env.nu` in an overlay, and unload it when leaving the
+# directory containing it.
 #
 # # Example
 # ```nushell
-# use nu-hooks/nuenv/hook.nu [ "nuenv allow", "nuenv disallow" ]
+# use nu-hooks/nuenv/hook.nu [ 'nuenv allow', 'nuenv disallow' ]
 # $env.config.hooks.env_change.PWD = (use nu-hooks/nuenv/hook.nu; hook setup)
 # ```
-export def setup []: [ nothing -> record<condition: closure, code: string> ] {
-    {
-        condition: {|_, after| $after | path join '.env.nu' | path exists }
-        code: $"
-            let allowed = if \('($NUENV_FILE)' | path exists\) {
-                open ($NUENV_FILE) | lines
-            } else {
-                []
+export def setup []: [ nothing -> list<record<condition: closure, code: string>> ] {
+    # NOTE: the hook order matters
+    [
+        {
+            condition: {|before, after|
+                $before != null and $before != $after and (
+                    ($before | path join '.env.nu' | path expand) in (overlay list | where active | get name)
+                )
             }
-
-            if \(open .env.nu | hash sha256\) not-in $allowed {
-                error make --unspanned {
-                    msg: $'\(ansi purple\)\('.env.nu' | path expand\)\(ansi reset\) is not allowed',
-                    help: $'please run \(ansi default_dimmed\)nuenv allow\(ansi reset\) first',
+            # Keep the destination of `cd`, not the overlay's previous PWD.
+            code: 'overlay hide $NUENV_OVERLAY --keep-env [PWD]'
+        }
+        {
+            condition: {||
+                if not ('.env.nu' | path exists) {
+                    return false
                 }
-            }
 
-            print $'[\(ansi yellow_bold\)nu-hooks nuenv\(ansi reset\)] loading env file \(ansi purple\).env.nu\(ansi reset\)'
-            source .env.nu
-        "
-    }
+                if (open '.env.nu' | hash sha256) not-in (get-allowed) {
+                    error make --unspanned {
+                        msg: $'(ansi purple).env.nu(ansi reset) is not allowed',
+                        help: $'please run (ansi default_dimmed)nuenv allow(ansi reset) first',
+                    }
+                }
+
+                true
+            }
+            # QUESTION: can reactivating an overlay restore its saved PWD?
+            code: r#'
+                const NUENV_OVERLAY = ('.env.nu' | path expand)
+                overlay new --reload $NUENV_OVERLAY
+                cd $after
+                print $'[(ansi yellow_bold)nu-hooks nuenv(ansi reset)] loading env file (ansi purple).env.nu(ansi reset)'
+                source .env.nu
+            '#
+        }
+    ]
 }
 
 def _log [msg: string, color: string] {
-    print $'[(ansi $color)nuenv(ansi reset)] (ansi purple)(".env.nu" | path expand)(ansi reset) ($msg)'
+    print $'[(ansi $color)nuenv(ansi reset)] (ansi purple)('.env.nu' | path expand)(ansi reset) ($msg)'
 }
 
 def warning [msg: string] {
-    _log $msg "yellow_bold"
+    _log $msg 'yellow_bold'
 }
 
 def info [msg: string] {
-    _log $msg "green_bold"
+    _log $msg 'green_bold'
 }
 
 def check-env-file [] {
-    if not (".env.nu" | path exists) {
+    if not ('.env.nu' | path exists) {
         error make --unspanned {
-            msg: $"(ansi red_bold)env file not found(ansi reset)",
-            help: $"no (ansi yellow).env.nu(ansi reset) in (ansi purple)(pwd)(ansi reset)",
+            msg: $'(ansi red_bold)env file not found(ansi reset)',
+            help: $'no (ansi yellow).env.nu(ansi reset) in (ansi purple)(pwd)(ansi reset)',
         }
     }
 }
 
-# adds `./.env.nu` to the list of allowed "env" files
-export def "nuenv allow" [] {
+# adds `./.env.nu` to the list of allowed 'env' files
+export def 'nuenv allow' [] {
     check-env-file
 
     let allowed = get-allowed
 
     let hash = open .env.nu | hash sha256
     if $hash in $allowed {
-        warning "is already allowed"
+        warning 'is already allowed'
         return
     }
 
-    mkdir ($nu.cache-dir | path join "nuenv")
+    mkdir ($nu.cache-dir | path join 'nuenv')
     $hash | $in + "\n" out>> $NUENV_FILE
-    info "has been allowed"
+    info 'has been allowed'
 }
 
-# removes `./.env.nu` from the list of allowed "env" files
-export def "nuenv disallow" [] {
+# removes `./.env.nu` from the list of allowed 'env' files
+export def 'nuenv disallow' [] {
     check-env-file
 
     let allowed = get-allowed
 
     let hash = open .env.nu | hash sha256
     if $hash not-in $allowed {
-        warning "is already disallowed"
+        warning 'is already disallowed'
         return
     }
 
     $allowed | find --invert $hash | to text | save --force $NUENV_FILE
-    info "has been disallowed"
+    info 'has been disallowed'
 }
